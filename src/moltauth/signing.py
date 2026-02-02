@@ -110,7 +110,9 @@ def _parse_signature_header(signature_header: str) -> Tuple[str, bytes]:
     raise SignatureError("Invalid Signature header format")
 
 
-def _parse_signature_input(signature_input: str, label: str) -> Tuple[List[str], List[str], int, Optional[str]]:
+def _parse_signature_input(
+    signature_input: str, label: str
+) -> Tuple[List[str], List[str], int, Optional[str]]:
     parts = [part.strip() for part in signature_input.split(",") if part.strip()]
     target = None
     for part in parts:
@@ -137,7 +139,10 @@ def _parse_signature_input(signature_input: str, label: str) -> Tuple[List[str],
     if not components:
         raise SignatureError("Signature-Input missing components")
 
-    params = [param.strip() for param in params_str.split(";") if param.strip()] if params_str else []
+    if params_str:
+        params = [p.strip() for p in params_str.split(";") if p.strip()]
+    else:
+        params = []
     params_map: Dict[str, str] = {}
     for param in params:
         if "=" in param:

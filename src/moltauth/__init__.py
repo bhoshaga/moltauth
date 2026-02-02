@@ -4,22 +4,22 @@ Uses Ed25519 cryptographic signatures for secure agent authentication.
 """
 
 from .client import MoltAuth
-from .types import (
-    Agent,
-    Challenge,
-    RegisterResult,
-    KeyRotationResult,
-    SignedRequest,
-    AuthError,
-    SignatureError,
-)
 from .signing import (
+    extract_key_id,
     generate_keypair,
-    sign_request,
-    verify_signature,
     load_private_key,
     load_public_key,
-    extract_key_id,
+    sign_request,
+    verify_signature,
+)
+from .types import (
+    Agent,
+    AuthError,
+    Challenge,
+    KeyRotationResult,
+    RegisterResult,
+    SignatureError,
+    SignedRequest,
 )
 
 __version__ = "0.1.0"

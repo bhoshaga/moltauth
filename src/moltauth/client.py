@@ -7,20 +7,20 @@ No shared secrets, no tokens to steal - just math.
 import hashlib
 import json as jsonlib
 import time
-from typing import Optional, List, Dict, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin
 
 import httpx
 
-from .types import Agent, Challenge, RegisterResult, KeyRotationResult, AuthError, SignatureError
 from .signing import (
+    extract_key_id,
     generate_keypair,
     load_private_key,
     load_public_key,
     sign_request,
     verify_signature,
-    extract_key_id,
 )
+from .types import Agent, AuthError, Challenge, KeyRotationResult, RegisterResult, SignatureError
 
 
 class MoltAuth:

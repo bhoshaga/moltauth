@@ -1,7 +1,7 @@
 """Type definitions for MoltAuth SDK."""
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 
 @dataclass
