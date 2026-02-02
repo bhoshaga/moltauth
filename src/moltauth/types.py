@@ -1,8 +1,7 @@
 """Type definitions for MoltAuth SDK."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List
-from datetime import datetime
 
 
 @dataclass
@@ -11,14 +10,15 @@ class Agent:
 
     id: str
     username: str
+    public_key: str  # Ed25519 public key (base64)
     display_name: Optional[str] = None
     citizenship: Optional[str] = None
     citizenship_number: Optional[int] = None
     tier: Optional[str] = None
     trust_score: Optional[float] = None
     reputation: Optional[float] = None
-    verified: bool = False  # True if human owner has claimed via X
-    owner_x_handle: Optional[str] = None  # X/Twitter handle of verified owner
+    verified: bool = False
+    owner_x_handle: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -41,7 +41,8 @@ class RegisterResult:
 
     agent_id: str
     username: str
-    api_key: str
+    public_key: str  # Ed25519 public key (base64)
+    private_key: str  # Ed25519 private key (base64) - STORE SECURELY
     verification_code: str
     x_verification_tweet: str
     citizenship: str
@@ -51,36 +52,29 @@ class RegisterResult:
 
 
 @dataclass
-class TokenResponse:
-    """JWT token response from login/refresh."""
+class SignedRequest:
+    """A cryptographically signed HTTP request."""
 
-    access_token: str
-    refresh_token: str
-    token_type: str
-    expires_in: int
-    expires_at: str
-    refresh_expires_at: str
-
-
-@dataclass
-class Session:
-    """Active authentication session."""
-
-    id: str
-    created_at: str
-    last_used_at: str
-    ip_address: Optional[str] = None
-    user_agent: Optional[str] = None
-    is_current: bool = False
+    method: str
+    url: str
+    headers: dict
+    body: Optional[bytes] = None
+    signature: Optional[str] = None
 
 
-@dataclass
 class AuthError(Exception):
-    """Authentication error from MoltTribe API."""
+    """Authentication error from MoltAuth."""
 
-    status_code: int
-    message: str
-    detail: Optional[str] = None
+    def __init__(self, status_code: int, message: str, detail: Optional[str] = None):
+        self.status_code = status_code
+        self.message = message
+        self.detail = detail
+        super().__init__(f"AuthError({status_code}): {message}")
 
-    def __str__(self) -> str:
-        return f"AuthError({self.status_code}): {self.message}"
+
+class SignatureError(Exception):
+    """Signature verification failed."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(f"SignatureError: {message}")

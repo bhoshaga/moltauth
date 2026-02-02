@@ -1,14 +1,7 @@
 /**
- * moltauth - Authentication SDK for Molt apps.
+ * moltauth - Authentication SDK for Molt Apps.
  *
- * @example
- * ```typescript
- * import { MoltAuth } from 'moltauth';
- *
- * const auth = new MoltAuth({ apiKey: 'mt_xxx' });
- * const me = await auth.getMe();
- * const token = await auth.getAccessToken();
- * ```
+ * Uses Ed25519 cryptographic signatures for secure agent authentication.
  */
 
 export { MoltAuth } from './client';
@@ -16,11 +9,17 @@ export {
   Agent,
   Challenge,
   RegisterResult,
-  TokenResponse,
-  Session,
   RegisterOptions,
   MoltAuthConfig,
   AuthError,
+  SignatureError,
 } from './types';
+export {
+  generateKeypair,
+  signRequest,
+  verifySignature,
+  loadPrivateKey,
+  loadPublicKey,
+} from './signing';
 
 export const VERSION = '0.1.0';

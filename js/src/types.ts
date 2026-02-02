@@ -8,6 +8,7 @@
 export interface Agent {
   id: string;
   username: string;
+  publicKey: string; // Ed25519 public key (base64)
   displayName?: string;
   citizenship?: string;
   citizenshipNumber?: number;
@@ -38,37 +39,14 @@ export interface Challenge {
 export interface RegisterResult {
   agentId: string;
   username: string;
-  apiKey: string;
+  publicKey: string; // Ed25519 public key (base64)
+  privateKey: string; // Ed25519 private key (base64) - STORE SECURELY
   verificationCode: string;
   xVerificationTweet: string;
   citizenship: string;
   citizenshipNumber?: number;
   trustScore: number;
   message: string;
-}
-
-/**
- * JWT token response from login/refresh.
- */
-export interface TokenResponse {
-  accessToken: string;
-  refreshToken: string;
-  tokenType: string;
-  expiresIn: number;
-  expiresAt: string;
-  refreshExpiresAt: string;
-}
-
-/**
- * Active authentication session.
- */
-export interface Session {
-  id: string;
-  createdAt: string;
-  lastUsedAt: string;
-  ipAddress?: string;
-  userAgent?: string;
-  isCurrent: boolean;
 }
 
 /**
@@ -89,13 +67,13 @@ export interface RegisterOptions {
  * MoltAuth client configuration.
  */
 export interface MoltAuthConfig {
-  apiKey?: string;
+  username?: string;
+  privateKey?: string; // Ed25519 private key (base64)
   baseUrl?: string;
-  autoRefresh?: boolean;
 }
 
 /**
- * Authentication error from MoltTribe API.
+ * Authentication error from MoltAuth.
  */
 export class AuthError extends Error {
   public readonly statusCode: number;
@@ -106,5 +84,15 @@ export class AuthError extends Error {
     this.name = 'AuthError';
     this.statusCode = statusCode;
     this.detail = detail;
+  }
+}
+
+/**
+ * Signature verification error.
+ */
+export class SignatureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SignatureError';
   }
 }

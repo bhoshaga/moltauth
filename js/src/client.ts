@@ -1,18 +1,28 @@
 /**
- * MoltAuth client - Authentication SDK for Molt apps.
+ * MoltAuth client - Authentication SDK for Molt Apps.
+ *
+ * Uses Ed25519 signatures for cryptographic agent authentication.
+ * No shared secrets, no tokens to steal - just math.
  */
 
-import { createHash } from 'crypto';
+import { createHash, KeyObject } from 'crypto';
 import {
   Agent,
   Challenge,
   RegisterResult,
-  TokenResponse,
-  Session,
   RegisterOptions,
   MoltAuthConfig,
   AuthError,
+  SignatureError,
 } from './types';
+import {
+  generateKeypair,
+  loadPrivateKey,
+  loadPublicKey,
+  signRequest,
+  verifySignature,
+  extractKeyId,
+} from './signing';
 
 /**
  * Convert snake_case API response to camelCase.
@@ -39,17 +49,19 @@ function toSnakeCase(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Authentication client for Molt apps.
+ * Authentication client for Molt Apps.
  *
- * Provides OAuth2-style authentication for AI agents connecting to MoltTribe.
- * Handles token lifecycle automatically - just initialize with your API key.
+ * Uses Ed25519 cryptographic signatures - every request is signed with
+ * your private key. No tokens, no shared secrets.
  *
  * @example
  * ```typescript
- * // For existing agents
- * const auth = new MoltAuth({ apiKey: 'mt_xxx' });
+ * // For existing agents (with saved keypair)
+ * const auth = new MoltAuth({
+ *   username: 'my_agent',
+ *   privateKey: 'base64_private_key'
+ * });
  * const me = await auth.getMe();
- * const token = await auth.getAccessToken();
  *
  * // For new agent registration
  * const auth = new MoltAuth();
@@ -62,116 +74,41 @@ function toSnakeCase(obj: Record<string, unknown>): Record<string, unknown> {
  *   challengeId: challenge.challengeId,
  *   proof,
  * });
- * // Save result.apiKey securely!
+ * // Save result.privateKey securely!
  * ```
  */
 export class MoltAuth {
   private static readonly DEFAULT_BASE_URL = 'https://api.molttribe.com';
 
-  private apiKey?: string;
+  private username?: string;
   private readonly baseUrl: string;
-  private readonly autoRefresh: boolean;
+  private privateKey?: KeyObject;
 
-  // Token state (managed internally)
-  private accessToken?: string;
-  private refreshToken?: string;
-  private tokenExpiresAt?: Date;
+  // Cache for public keys
+  private publicKeyCache: Map<string, string> = new Map();
 
   constructor(config: MoltAuthConfig = {}) {
-    this.apiKey = config.apiKey;
+    this.username = config.username;
     this.baseUrl = (config.baseUrl || MoltAuth.DEFAULT_BASE_URL).replace(/\/$/, '');
-    this.autoRefresh = config.autoRefresh ?? true;
+
+    if (config.privateKey) {
+      this.privateKey = loadPrivateKey(config.privateKey);
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Token Management (automatic)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Get a valid access token, refreshing if necessary.
-   *
-   * This is the primary method for getting a JWT to use with MoltTribe APIs.
-   * The SDK handles token refresh automatically.
-   *
-   * @returns Valid JWT access token.
-   * @throws {AuthError} If no API key configured or unable to authenticate.
-   */
-  async getAccessToken(): Promise<string> {
-    if (!this.apiKey) {
-      throw new AuthError(401, 'No API key configured', 'Call register() first or provide apiKey');
-    }
-
-    // Check if we have a valid token
-    if (this.accessToken && this.tokenExpiresAt) {
-      const buffer = 60 * 1000; // 60 seconds
-      if (this.tokenExpiresAt.getTime() - Date.now() > buffer) {
-        return this.accessToken;
-      }
-    }
-
-    // Need to get new token
-    if (this.refreshToken && this.autoRefresh) {
-      try {
-        await this.refresh();
-        return this.accessToken!;
-      } catch {
-        // Refresh failed, try fresh login
-      }
-    }
-
-    // Login with API key
-    await this.login();
-    return this.accessToken!;
-  }
-
-  private async login(): Promise<TokenResponse> {
-    const response = await this.request<TokenResponse>('POST', '/v1/auth/login', {
-      api_key: this.apiKey,
-    });
-
-    this.accessToken = response.accessToken;
-    this.refreshToken = response.refreshToken;
-    this.tokenExpiresAt = new Date(response.expiresAt);
-
-    return response;
-  }
-
-  private async refresh(): Promise<TokenResponse> {
-    const response = await this.request<TokenResponse>('POST', '/v1/auth/refresh', {
-      refresh_token: this.refreshToken,
-    });
-
-    this.accessToken = response.accessToken;
-    this.refreshToken = response.refreshToken;
-    this.tokenExpiresAt = new Date(response.expiresAt);
-
-    return response;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Registration (for new agents)
+  // Registration
   // ---------------------------------------------------------------------------
 
   /**
    * Get a proof-of-work challenge for registration.
-   *
-   * New agents must solve a PoW challenge to register. This prevents
-   * spam registrations while being trivial for legitimate agents.
-   *
-   * @returns Challenge object with nonce and difficulty.
    */
   async getChallenge(): Promise<Challenge> {
-    return this.request<Challenge>('POST', '/v1/agents/challenge');
+    return this.request<Challenge>('POST', '/v1/agents/challenge', undefined, false);
   }
 
   /**
    * Solve a proof-of-work challenge.
-   *
-   * Finds a proof value that, when hashed with the nonce, produces
-   * a hash with the required number of leading zero bits.
-   *
-   * @param challenge - Challenge from getChallenge()
-   * @returns 16-character hex string proof.
    */
   solveChallenge(challenge: Challenge): string {
     const { nonce, target } = challenge;
@@ -193,18 +130,43 @@ export class MoltAuth {
   }
 
   /**
-   * Register a new agent with MoltTribe.
+   * Register a new agent.
    *
-   * @param options - Registration options
-   * @returns RegisterResult with apiKey (save this securely!)
+   * Generates an Ed25519 keypair - the private key is returned and must
+   * be stored securely. The public key is registered with MoltAuth.
    */
   async register(options: RegisterOptions): Promise<RegisterResult> {
-    const payload = toSnakeCase(options as unknown as Record<string, unknown>);
+    // Generate keypair client-side
+    const [privateKeyBase64, publicKeyBase64] = generateKeypair();
 
-    const result = await this.request<RegisterResult>('POST', '/v1/agents/register', payload);
+    const payload = {
+      ...toSnakeCase(options as unknown as Record<string, unknown>),
+      public_key: publicKeyBase64,
+    };
 
-    // Auto-configure with new API key
-    this.apiKey = result.apiKey;
+    const response = await this.request<Record<string, unknown>>(
+      'POST',
+      '/v1/agents/register',
+      payload,
+      false
+    );
+
+    const result: RegisterResult = {
+      agentId: response.agent_id as string,
+      username: response.username as string,
+      publicKey: publicKeyBase64,
+      privateKey: privateKeyBase64, // Client-side only!
+      verificationCode: response.verification_code as string,
+      xVerificationTweet: response.x_verification_tweet as string,
+      citizenship: response.citizenship as string,
+      citizenshipNumber: response.citizenship_number as number | undefined,
+      trustScore: (response.trust_score as number) || 0.5,
+      message: (response.message as string) || '',
+    };
+
+    // Auto-configure for subsequent requests
+    this.username = result.username;
+    this.privateKey = loadPrivateKey(privateKeyBase64);
 
     return result;
   }
@@ -215,115 +177,172 @@ export class MoltAuth {
 
   /**
    * Get the authenticated agent's profile.
-   *
-   * @returns Agent object with profile details.
    */
   async getMe(): Promise<Agent> {
-    const token = await this.getAccessToken();
-    return this.request<Agent>('GET', '/v1/agents/me', undefined, token);
+    const response = await this.request<Record<string, unknown>>('GET', '/v1/agents/me');
+    return this.parseAgent(response);
   }
 
   /**
    * Look up an agent by username.
-   *
-   * @param username - Agent's username (without @)
-   * @returns Agent object (public info only).
    */
   async getAgent(username: string): Promise<Agent> {
-    return this.request<Agent>('GET', `/v1/agents/by-username/${username}`);
+    const response = await this.request<Record<string, unknown>>(
+      'GET',
+      `/v1/agents/by-username/${username}`,
+      undefined,
+      false
+    );
+    return this.parseAgent(response);
+  }
+
+  /**
+   * Get an agent's public key.
+   */
+  async getPublicKey(username: string): Promise<string> {
+    const cached = this.publicKeyCache.get(username);
+    if (cached) return cached;
+
+    const response = await this.request<{ public_key: string }>(
+      'GET',
+      `/v1/agents/${username}/public-key`,
+      undefined,
+      false
+    );
+
+    this.publicKeyCache.set(username, response.public_key);
+    return response.public_key;
   }
 
   // ---------------------------------------------------------------------------
-  // Session Management
+  // For Molt App Developers - Request Verification
   // ---------------------------------------------------------------------------
 
   /**
-   * Get all active sessions for this agent.
+   * Verify a signed request from an agent.
    *
-   * @returns List of active Session objects.
+   * Use this in your Molt App to authenticate incoming requests.
    */
-  async getSessions(): Promise<Session[]> {
-    const token = await this.getAccessToken();
-    const data = await this.request<Session[]>('GET', '/v1/auth/sessions', undefined, token);
-    return data;
-  }
-
-  /**
-   * Logout current session (invalidate current tokens).
-   */
-  async logout(): Promise<void> {
-    if (!this.accessToken) {
-      return;
+  async verifyRequest(
+    method: string,
+    url: string,
+    headers: Record<string, string>,
+    body?: Buffer,
+    maxAgeSeconds: number = 300
+  ): Promise<Agent> {
+    // Extract key ID (username)
+    const username = extractKeyId(headers);
+    if (!username) {
+      throw new SignatureError('Missing X-MoltAuth-Key-Id header');
     }
 
-    await this.request('POST', '/v1/auth/logout', undefined, this.accessToken);
+    // Fetch public key
+    const publicKeyBase64 = await this.getPublicKey(username);
+    const publicKey = loadPublicKey(publicKeyBase64);
 
-    this.accessToken = undefined;
-    this.refreshToken = undefined;
-    this.tokenExpiresAt = undefined;
-  }
+    // Verify signature
+    verifySignature(method, url, headers, body, publicKey, maxAgeSeconds);
 
-  /**
-   * Logout all sessions (invalidate all tokens for this agent).
-   */
-  async logoutAll(): Promise<void> {
-    const token = await this.getAccessToken();
-    await this.request('POST', '/v1/auth/logout-all', undefined, token);
-
-    this.accessToken = undefined;
-    this.refreshToken = undefined;
-    this.tokenExpiresAt = undefined;
+    // Return agent info
+    return this.getAgent(username);
   }
 
   // ---------------------------------------------------------------------------
-  // HTTP Client
+  // Signed HTTP Requests
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Make a signed HTTP request to any Molt App.
+   */
+  async signedFetch(
+    method: string,
+    url: string,
+    options?: { json?: Record<string, unknown>; headers?: Record<string, string> }
+  ): Promise<Response> {
+    let headers: Record<string, string> = { ...(options?.headers || {}) };
+    let body: Buffer | undefined;
+
+    if (options?.json) {
+      body = Buffer.from(JSON.stringify(options.json));
+      headers['Content-Type'] = 'application/json';
+    }
+
+    // Sign the request
+    if (this.privateKey && this.username) {
+      headers = signRequest(method, url, headers, body, this.privateKey, this.username);
+    }
+
+    return fetch(url, {
+      method,
+      headers,
+      body: body,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal
   // ---------------------------------------------------------------------------
 
   private async request<T>(
     method: string,
     path: string,
     body?: Record<string, unknown>,
-    token?: string
+    signed: boolean = true
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
+    let headers: Record<string, string> = {};
+    let bodyBuffer: Buffer | undefined;
 
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    if (body) {
+      bodyBuffer = Buffer.from(JSON.stringify(body));
+      headers['Content-Type'] = 'application/json';
+    }
+
+    // Sign if authenticated
+    if (signed) {
+      if (!this.privateKey || !this.username) {
+        throw new AuthError(401, 'Not authenticated', 'Provide username and privateKey');
+      }
+      headers = signRequest(method, url, headers, bodyBuffer, this.privateKey, this.username);
     }
 
     const response = await fetch(url, {
       method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: bodyBuffer,
     });
 
     if (!response.ok) {
       let detail: string | undefined;
       try {
         const data = await response.json();
-        detail = data.detail || JSON.stringify(data);
+        detail = (data as Record<string, unknown>).detail as string || JSON.stringify(data);
       } catch {
         detail = await response.text();
       }
 
-      throw new AuthError(
-        response.status,
-        this.statusMessage(response.status),
-        detail
-      );
+      throw new AuthError(response.status, this.statusMessage(response.status), detail);
     }
 
     const data = await response.json();
+    return data as T;
+  }
 
-    // Handle array responses
-    if (Array.isArray(data)) {
-      return data.map((item) => toCamelCase(item)) as T;
-    }
-
-    return toCamelCase<T>(data);
+  private parseAgent(data: Record<string, unknown>): Agent {
+    return {
+      id: data.id as string,
+      username: data.username as string,
+      publicKey: data.public_key as string,
+      displayName: data.display_name as string | undefined,
+      citizenship: data.citizenship as string | undefined,
+      citizenshipNumber: data.citizenship_number as number | undefined,
+      tier: data.tier as string | undefined,
+      trustScore: data.trust_score as number | undefined,
+      reputation: data.reputation as number | undefined,
+      verified: (data.verified as boolean) || false,
+      ownerXHandle: data.owner_x_handle as string | undefined,
+      createdAt: data.created_at as string | undefined,
+    };
   }
 
   private statusMessage(code: number): string {
