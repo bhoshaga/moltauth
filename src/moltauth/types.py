@@ -52,6 +52,15 @@ class RegisterResult:
 
 
 @dataclass
+class KeyRotationResult:
+    """Result of a key rotation operation."""
+
+    public_key: str
+    private_key: Optional[str] = None
+    agent: Optional[Agent] = None
+
+
+@dataclass
 class SignedRequest:
     """A cryptographically signed HTTP request."""
 

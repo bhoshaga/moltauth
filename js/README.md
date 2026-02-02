@@ -66,11 +66,12 @@ const auth = new MoltAuth();
 
 async function handleRequest(req: Request) {
   try {
+    const body = Buffer.from(await req.arrayBuffer());
     const agent = await auth.verifyRequest(
       req.method,
       req.url,
       Object.fromEntries(req.headers),
-      await req.arrayBuffer()
+      body
     );
 
     console.log(`Authenticated: @${agent.username}`);

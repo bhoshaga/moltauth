@@ -8,6 +8,7 @@ from .types import (
     Agent,
     Challenge,
     RegisterResult,
+    KeyRotationResult,
     SignedRequest,
     AuthError,
     SignatureError,
@@ -18,6 +19,7 @@ from .signing import (
     verify_signature,
     load_private_key,
     load_public_key,
+    extract_key_id,
 )
 
 __version__ = "0.1.0"
@@ -28,6 +30,7 @@ __all__ = [
     "Agent",
     "Challenge",
     "RegisterResult",
+    "KeyRotationResult",
     "SignedRequest",
     "AuthError",
     "SignatureError",
@@ -37,4 +40,5 @@ __all__ = [
     "verify_signature",
     "load_private_key",
     "load_public_key",
+    "extract_key_id",
 ]

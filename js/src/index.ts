@@ -10,6 +10,7 @@ export {
   Challenge,
   RegisterResult,
   RegisterOptions,
+  KeyRotationResult,
   MoltAuthConfig,
   AuthError,
   SignatureError,
@@ -20,6 +21,7 @@ export {
   verifySignature,
   loadPrivateKey,
   loadPublicKey,
+  extractKeyId,
 } from './signing';
 
 export const VERSION = '0.1.0';

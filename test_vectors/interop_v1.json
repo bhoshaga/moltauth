@@ -1,0 +1,16 @@
+{
+  "id": "interop-v1",
+  "description": "Deterministic interop vector for MoltAuth profile",
+  "method": "POST",
+  "url": "https://api.molttribe.com/v1/agents/me",
+  "headers": {
+    "Date": "Tue, 20 Apr 2021 02:07:55 GMT"
+  },
+  "body": "{\"content\":\"hello\"}",
+  "created": 1618884473,
+  "key_id": "test-key-ed25519",
+  "public_key_b64": "JrQLj5P/89iXES9+vFgrIy29clF9CC/oPPsw3c5D0bs=",
+  "private_key_b64": "n4Ni+HpISpVObnQMW0wOhCKROaIKqKtW/2ZYb2p9KcU=",
+  "signature_input": "sig1=(\"@method\" \"@target-uri\" \"@authority\" \"date\" \"content-digest\");created=1618884473;alg=\"ed25519\"",
+  "signature": "sig1=:qpR9LFPnC/w4si6FRFfX6QPy1wAJZqmh/Mz5usOliMu3JQ8StOcWBtHm14AGpt92NsrCUxTaBcQZAnhOoNSeCg==:"
+}

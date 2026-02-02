@@ -5,13 +5,14 @@ No shared secrets, no tokens to steal - just math.
 """
 
 import hashlib
-import json
-from typing import Optional, List, Dict, Any
+import json as jsonlib
+import time
+from typing import Optional, List, Dict, Tuple
 from urllib.parse import urljoin
 
 import httpx
 
-from .types import Agent, Challenge, RegisterResult, AuthError, SignatureError
+from .types import Agent, Challenge, RegisterResult, KeyRotationResult, AuthError, SignatureError
 from .signing import (
     generate_keypair,
     load_private_key,
@@ -57,6 +58,7 @@ class MoltAuth:
         username: Optional[str] = None,
         private_key: Optional[str] = None,
         base_url: str = DEFAULT_BASE_URL,
+        public_key_ttl_seconds: int = 300,
     ):
         """Initialize the MoltAuth client.
 
@@ -64,6 +66,7 @@ class MoltAuth:
             username: Your agent's username (required for signed requests)
             private_key: Your Ed25519 private key in base64 (required for signed requests)
             base_url: API base URL (default: https://api.molttribe.com)
+            public_key_ttl_seconds: Public key cache TTL in seconds (0 disables caching)
         """
         self.username = username
         self.base_url = base_url.rstrip("/")
@@ -75,7 +78,8 @@ class MoltAuth:
         self._client = httpx.AsyncClient()
 
         # Cache for public keys (username -> public_key)
-        self._public_key_cache: Dict[str, Any] = {}
+        self._public_key_cache: Dict[str, Tuple[str, float]] = {}
+        self._public_key_ttl_seconds = public_key_ttl_seconds
 
     # -------------------------------------------------------------------------
     # Registration
@@ -99,17 +103,25 @@ class MoltAuth:
         Returns:
             16-character hex string proof.
         """
-        nonce = challenge.nonce
-        target = int(challenge.target, 16)
+        nonce_bytes = bytes.fromhex(challenge.nonce)
+        difficulty = challenge.difficulty
 
         proof = 0
         while True:
-            proof_hex = format(proof, "016x")
-            hash_input = f"{nonce}{proof_hex}".encode()
-            hash_result = hashlib.sha256(hash_input).hexdigest()
+            proof_bytes = proof.to_bytes(8, "big")
+            digest = hashlib.sha256(nonce_bytes + proof_bytes).digest()
 
-            if int(hash_result, 16) < target:
-                return proof_hex
+            # Count leading zero bits
+            leading_zeros = 0
+            for byte in digest:
+                if byte == 0:
+                    leading_zeros += 8
+                else:
+                    leading_zeros += (8 - byte.bit_length())
+                    break
+
+            if leading_zeros >= difficulty:
+                return proof_bytes.hex()
 
             proof += 1
 
@@ -120,9 +132,6 @@ class MoltAuth:
         parent_system: str,
         challenge_id: str,
         proof: str,
-        capabilities: Optional[List[str]] = None,
-        display_name: Optional[str] = None,
-        description: Optional[str] = None,
     ) -> RegisterResult:
         """Register a new agent.
 
@@ -131,13 +140,10 @@ class MoltAuth:
 
         Args:
             username: Unique username (alphanumeric + underscore, 3-30 chars)
-            agent_type: Type of agent (e.g., 'conversational_assistant')
-            parent_system: System that runs this agent (e.g., 'my_app')
+            agent_type: Type of agent (e.g., 'assistant')
+            parent_system: System that created this agent (e.g., 'claude')
             challenge_id: ID from get_challenge()
             proof: Solution from solve_challenge()
-            capabilities: List of agent capabilities
-            display_name: Human-friendly name
-            description: Brief description
 
         Returns:
             RegisterResult with private_key (SAVE THIS SECURELY!)
@@ -153,13 +159,6 @@ class MoltAuth:
             "proof": proof,
             "public_key": public_key_b64,
         }
-
-        if capabilities:
-            payload["capabilities"] = capabilities
-        if display_name:
-            payload["display_name"] = display_name
-        if description:
-            payload["description"] = description
 
         response = await self._request("POST", "/v1/agents/register", json=payload, signed=False)
 
@@ -180,6 +179,11 @@ class MoltAuth:
         # Auto-configure for subsequent requests
         self.username = result.username
         self._private_key = load_private_key(private_key_b64)
+        if self._public_key_ttl_seconds > 0:
+            self._public_key_cache[self.username] = (
+                public_key_b64,
+                time.time() + self._public_key_ttl_seconds,
+            )
 
         return result
 
@@ -221,14 +225,23 @@ class MoltAuth:
         Returns:
             Base64-encoded Ed25519 public key.
         """
-        if username in self._public_key_cache:
-            return self._public_key_cache[username]
+        if self._public_key_ttl_seconds > 0:
+            cached = self._public_key_cache.get(username)
+            if cached:
+                public_key, expires_at = cached
+                if time.time() < expires_at:
+                    return public_key
+                self._public_key_cache.pop(username, None)
 
         response = await self._request(
             "GET", f"/v1/agents/{username}/public-key", signed=False
         )
         public_key = response["public_key"]
-        self._public_key_cache[username] = public_key
+        if self._public_key_ttl_seconds > 0:
+            self._public_key_cache[username] = (
+                public_key,
+                time.time() + self._public_key_ttl_seconds,
+            )
         return public_key
 
     # -------------------------------------------------------------------------
@@ -242,6 +255,7 @@ class MoltAuth:
         headers: dict,
         body: Optional[bytes] = None,
         max_age_seconds: int = 300,
+        max_clock_skew_seconds: int = 60,
     ) -> Agent:
         """Verify a signed request from an agent.
 
@@ -253,6 +267,7 @@ class MoltAuth:
             headers: Request headers
             body: Request body (optional)
             max_age_seconds: Maximum signature age (default: 5 minutes)
+            max_clock_skew_seconds: Allowed clock skew for created timestamp (default: 60s)
 
         Returns:
             Agent who signed the request.
@@ -271,7 +286,9 @@ class MoltAuth:
         public_key = load_public_key(public_key_b64)
 
         # Verify signature
-        verify_signature(method, url, headers, body, public_key, max_age_seconds)
+        verify_signature(
+            method, url, headers, body, public_key, max_age_seconds, max_clock_skew_seconds
+        )
 
         # Return agent info
         return await self.get_agent(username)
@@ -301,8 +318,8 @@ class MoltAuth:
         headers = dict(headers or {})
         body = None
 
-        if json:
-            body = json.dumps(json).encode()
+        if json is not None:
+            body = jsonlib.dumps(json).encode()
             headers["Content-Type"] = "application/json"
 
         # Sign the request
@@ -320,6 +337,55 @@ class MoltAuth:
         return response
 
     # -------------------------------------------------------------------------
+    # Key Management
+    # -------------------------------------------------------------------------
+
+    async def rotate_key(
+        self,
+        new_public_key: Optional[str] = None,
+        new_private_key: Optional[str] = None,
+    ) -> KeyRotationResult:
+        """Rotate the agent's public key.
+
+        Provide both new_public_key and new_private_key, or neither to generate a new keypair.
+        """
+        if (new_public_key and not new_private_key) or (new_private_key and not new_public_key):
+            raise ValueError(
+                "Provide both new_public_key and new_private_key, or neither to generate."
+            )
+
+        if not new_public_key and not new_private_key:
+            new_private_key, new_public_key = generate_keypair()
+
+        payload = {"new_public_key": new_public_key}
+        response = await self._request("PUT", "/v1/agents/me/public-key", json=payload)
+
+        if new_private_key:
+            self._private_key = load_private_key(new_private_key)
+
+        if self.username and self._public_key_ttl_seconds > 0:
+            self._public_key_cache[self.username] = (
+                new_public_key,
+                time.time() + self._public_key_ttl_seconds,
+            )
+
+        agent = self._parse_agent(response) if "id" in response else None
+        return KeyRotationResult(
+            public_key=new_public_key,
+            private_key=new_private_key,
+            agent=agent,
+        )
+
+    async def revoke(self, tweet_url: str) -> dict:
+        """Revoke an agent key using an X verification tweet."""
+        payload = {"tweet_url": tweet_url}
+        return await self._request("POST", "/v1/agents/me/revoke", json=payload)
+
+    async def delete_me(self) -> dict:
+        """Delete the authenticated agent."""
+        return await self._request("DELETE", "/v1/agents/me")
+
+    # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
 
@@ -335,8 +401,8 @@ class MoltAuth:
         headers = {}
         body = None
 
-        if json:
-            body = json.dumps(json).encode() if isinstance(json, dict) else json
+        if json is not None:
+            body = jsonlib.dumps(json).encode() if isinstance(json, dict) else json
             headers["Content-Type"] = "application/json"
 
         # Sign if authenticated
@@ -357,20 +423,26 @@ class MoltAuth:
         if not response.is_success:
             self._handle_error(response)
 
-        return response.json()
+        if response.status_code == 204 or not response.content:
+            return {}
+
+        try:
+            return response.json()
+        except Exception:
+            return {"detail": response.text}
 
     def _parse_agent(self, data: dict) -> Agent:
         """Parse agent from API response."""
         return Agent(
-            id=data["id"],
+            id=data.get("agent_id") or data.get("id"),
             username=data["username"],
-            public_key=data["public_key"],
-            display_name=data.get("display_name"),
+            public_key=data.get("public_key"),
+            display_name=data.get("name") or data.get("display_name"),
             citizenship=data.get("citizenship"),
             citizenship_number=data.get("citizenship_number"),
             tier=data.get("tier"),
             trust_score=data.get("trust_score"),
-            reputation=data.get("reputation"),
+            reputation=data.get("reputation_score") or data.get("reputation"),
             verified=data.get("verified", False),
             owner_x_handle=data.get("owner_x_handle"),
             created_at=data.get("created_at"),

@@ -11,6 +11,7 @@ import {
   Challenge,
   RegisterResult,
   RegisterOptions,
+  KeyRotationResult,
   MoltAuthConfig,
   AuthError,
   SignatureError,
@@ -83,13 +84,15 @@ export class MoltAuth {
   private username?: string;
   private readonly baseUrl: string;
   private privateKey?: KeyObject;
+  private readonly publicKeyTtlSeconds: number;
 
   // Cache for public keys
-  private publicKeyCache: Map<string, string> = new Map();
+  private publicKeyCache: Map<string, { key: string; expiresAt: number }> = new Map();
 
   constructor(config: MoltAuthConfig = {}) {
     this.username = config.username;
     this.baseUrl = (config.baseUrl || MoltAuth.DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.publicKeyTtlSeconds = config.publicKeyTtlSeconds ?? 300;
 
     if (config.privateKey) {
       this.privateKey = loadPrivateKey(config.privateKey);
@@ -111,18 +114,31 @@ export class MoltAuth {
    * Solve a proof-of-work challenge.
    */
   solveChallenge(challenge: Challenge): string {
-    const { nonce, target } = challenge;
-    const targetBigInt = BigInt('0x' + target);
+    const { nonce, difficulty } = challenge;
+    const nonceBytes = Buffer.from(nonce, 'hex');
 
     let proof = 0n;
     while (true) {
-      const proofHex = proof.toString(16).padStart(16, '0');
-      const hashInput = nonce + proofHex;
-      const hash = createHash('sha256').update(hashInput).digest('hex');
-      const hashBigInt = BigInt('0x' + hash);
+      // Convert proof to 8-byte big-endian buffer
+      const proofBytes = Buffer.alloc(8);
+      proofBytes.writeBigUInt64BE(proof);
 
-      if (hashBigInt < targetBigInt) {
-        return proofHex;
+      // Hash nonce + proof bytes
+      const digest = createHash('sha256').update(Buffer.concat([nonceBytes, proofBytes])).digest();
+
+      // Count leading zero bits
+      let leadingZeros = 0;
+      for (const byte of digest) {
+        if (byte === 0) {
+          leadingZeros += 8;
+        } else {
+          leadingZeros += Math.clz32(byte) - 24; // clz32 counts from 32 bits, we want from 8
+          break;
+        }
+      }
+
+      if (leadingZeros >= difficulty) {
+        return proofBytes.toString('hex');
       }
 
       proof++;
@@ -167,6 +183,12 @@ export class MoltAuth {
     // Auto-configure for subsequent requests
     this.username = result.username;
     this.privateKey = loadPrivateKey(privateKeyBase64);
+    if (this.username && this.publicKeyTtlSeconds > 0) {
+      this.publicKeyCache.set(this.username, {
+        key: publicKeyBase64,
+        expiresAt: Date.now() + this.publicKeyTtlSeconds * 1000,
+      });
+    }
 
     return result;
   }
@@ -200,8 +222,15 @@ export class MoltAuth {
    * Get an agent's public key.
    */
   async getPublicKey(username: string): Promise<string> {
-    const cached = this.publicKeyCache.get(username);
-    if (cached) return cached;
+    if (this.publicKeyTtlSeconds > 0) {
+      const cached = this.publicKeyCache.get(username);
+      if (cached) {
+        if (Date.now() < cached.expiresAt) {
+          return cached.key;
+        }
+        this.publicKeyCache.delete(username);
+      }
+    }
 
     const response = await this.request<{ public_key: string }>(
       'GET',
@@ -210,7 +239,12 @@ export class MoltAuth {
       false
     );
 
-    this.publicKeyCache.set(username, response.public_key);
+    if (this.publicKeyTtlSeconds > 0) {
+      this.publicKeyCache.set(username, {
+        key: response.public_key,
+        expiresAt: Date.now() + this.publicKeyTtlSeconds * 1000,
+      });
+    }
     return response.public_key;
   }
 
@@ -228,7 +262,8 @@ export class MoltAuth {
     url: string,
     headers: Record<string, string>,
     body?: Buffer,
-    maxAgeSeconds: number = 300
+    maxAgeSeconds: number = 300,
+    maxClockSkewSeconds: number = 60
   ): Promise<Agent> {
     // Extract key ID (username)
     const username = extractKeyId(headers);
@@ -241,7 +276,7 @@ export class MoltAuth {
     const publicKey = loadPublicKey(publicKeyBase64);
 
     // Verify signature
-    verifySignature(method, url, headers, body, publicKey, maxAgeSeconds);
+    verifySignature(method, url, headers, body, publicKey, maxAgeSeconds, maxClockSkewSeconds);
 
     // Return agent info
     return this.getAgent(username);
@@ -277,6 +312,70 @@ export class MoltAuth {
       headers,
       body: body,
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Key Management
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Rotate the agent's public key.
+   *
+   * Provide both newPublicKey and newPrivateKey, or neither to generate a new keypair.
+   */
+  async rotateKey(options: {
+    newPublicKey?: string;
+    newPrivateKey?: string;
+  } = {}): Promise<KeyRotationResult> {
+    const { newPublicKey, newPrivateKey } = options;
+    if ((newPublicKey && !newPrivateKey) || (newPrivateKey && !newPublicKey)) {
+      throw new Error('Provide both newPublicKey and newPrivateKey, or neither to generate.');
+    }
+
+    let publicKey = newPublicKey;
+    let privateKey = newPrivateKey;
+    if (!publicKey && !privateKey) {
+      [privateKey, publicKey] = generateKeypair();
+    }
+
+    const response = await this.request<Record<string, unknown>>(
+      'PUT',
+      '/v1/agents/me/public-key',
+      { new_public_key: publicKey }
+    );
+
+    if (privateKey) {
+      this.privateKey = loadPrivateKey(privateKey);
+    }
+
+    if (this.username && this.publicKeyTtlSeconds > 0) {
+      this.publicKeyCache.set(this.username, {
+        key: publicKey as string,
+        expiresAt: Date.now() + this.publicKeyTtlSeconds * 1000,
+      });
+    }
+
+    const agent = response.id ? this.parseAgent(response) : undefined;
+
+    return {
+      publicKey: publicKey as string,
+      privateKey,
+      agent,
+    };
+  }
+
+  /**
+   * Revoke an agent key using an X verification tweet.
+   */
+  async revoke(tweetUrl: string): Promise<Record<string, unknown>> {
+    return this.request('POST', '/v1/agents/me/revoke', { tweet_url: tweetUrl });
+  }
+
+  /**
+   * Delete the authenticated agent.
+   */
+  async deleteMe(): Promise<Record<string, unknown>> {
+    return this.request('DELETE', '/v1/agents/me');
   }
 
   // ---------------------------------------------------------------------------
@@ -324,8 +423,20 @@ export class MoltAuth {
       throw new AuthError(response.status, this.statusMessage(response.status), detail);
     }
 
-    const data = await response.json();
-    return data as T;
+    if (response.status === 204) {
+      return {} as T;
+    }
+
+    const text = await response.text();
+    if (!text) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return { detail: text } as T;
+    }
   }
 
   private parseAgent(data: Record<string, unknown>): Agent {

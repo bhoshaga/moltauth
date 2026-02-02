@@ -7,6 +7,150 @@
 import { createHash, sign, verify, generateKeyPairSync, KeyObject } from 'crypto';
 import { SignatureError } from './types';
 
+const SIGNATURE_LABEL = 'sig1';
+const REQUIRED_COMPONENTS = new Set(['@method', '@target-uri', '@authority', 'date']);
+
+function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    normalized[key.toLowerCase()] = String(value);
+  }
+  return normalized;
+}
+
+function normalizeAuthority(url: URL): string {
+  const hostname = url.hostname.toLowerCase();
+  const scheme = url.protocol.replace(':', '').toLowerCase();
+  const port = url.port ? Number.parseInt(url.port, 10) : undefined;
+  const defaultPort = scheme === 'http' ? 80 : scheme === 'https' ? 443 : undefined;
+  const needsPort = port !== undefined && port !== defaultPort;
+
+  const hostValue = hostname.includes(':') ? `[${hostname}]` : hostname;
+  if (needsPort) {
+    return `${hostValue}:${port}`;
+  }
+  return hostValue;
+}
+
+function contentDigest(body: Buffer): string {
+  const digest = createHash('sha256').update(body).digest('base64');
+  return `sha-256=:${digest}:`;
+}
+
+function formatSignatureParams(components: string[], params: string[]): string {
+  const componentsStr = components.map((c) => `"${c}"`).join(' ');
+  if (params.length > 0) {
+    return `(${componentsStr});${params.join(';')}`;
+  }
+  return `(${componentsStr})`;
+}
+
+function buildSignatureBase(
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  components: string[],
+  signatureParams: string
+): string {
+  const parsedUrl = new URL(url);
+  const headerLookup = normalizeHeaders(headers);
+
+  const lines: string[] = [];
+  for (const component of components) {
+    if (component === '@method') {
+      lines.push(`"@method": ${method.toUpperCase()}`);
+    } else if (component === '@target-uri') {
+      lines.push(`"@target-uri": ${url}`);
+    } else if (component === '@authority') {
+      lines.push(`"@authority": ${normalizeAuthority(parsedUrl)}`);
+    } else if (component === '@scheme') {
+      lines.push(`"@scheme": ${parsedUrl.protocol.replace(':', '').toLowerCase()}`);
+    } else if (component === '@path') {
+      lines.push(`"@path": ${parsedUrl.pathname || '/'}`);
+    } else if (component === '@query') {
+      lines.push(`"@query": ${parsedUrl.search ? parsedUrl.search : '?'}`);
+    } else if (component.startsWith('@')) {
+      throw new SignatureError(`Unsupported signature component: ${component}`);
+    } else {
+      const lookupKey = component.toLowerCase();
+      if (!headerLookup[lookupKey]) {
+        throw new SignatureError(`Missing required header for signature: ${component}`);
+      }
+      lines.push(`"${component}": ${headerLookup[lookupKey]}`);
+    }
+  }
+
+  lines.push(`"@signature-params": ${signatureParams}`);
+  return lines.join('\n');
+}
+
+function parseSignatureHeader(signatureHeader: string): { label: string; signature: Buffer } {
+  const parts = signatureHeader.split(',').map((part) => part.trim()).filter(Boolean);
+  for (const part of parts) {
+    const match = part.match(/^([a-zA-Z0-9_-]+)=:([^:]+):$/);
+    if (!match) continue;
+    const [, label, signatureBase64] = match;
+    try {
+      return { label, signature: Buffer.from(signatureBase64, 'base64') };
+    } catch {
+      throw new SignatureError('Invalid signature encoding');
+    }
+  }
+  throw new SignatureError('Invalid Signature header format');
+}
+
+function parseSignatureInput(
+  signatureInput: string,
+  label: string
+): { components: string[]; params: string[]; created: number; alg?: string } {
+  const parts = signatureInput.split(',').map((part) => part.trim()).filter(Boolean);
+  const target = parts.find((part) => part.startsWith(`${label}=`));
+  if (!target) {
+    throw new SignatureError('Signature-Input missing matching label');
+  }
+
+  const separatorIndex = target.indexOf('=');
+  const value = separatorIndex >= 0 ? target.slice(separatorIndex + 1) : '';
+  if (!value.startsWith('(')) {
+    throw new SignatureError('Invalid Signature-Input header format');
+  }
+  const closingIndex = value.indexOf(')');
+  if (closingIndex === -1) {
+    throw new SignatureError('Invalid Signature-Input header format');
+  }
+
+  const componentsStr = value.slice(1, closingIndex).trim();
+  let paramsStr = value.slice(closingIndex + 1).trim();
+  if (paramsStr.startsWith(';')) {
+    paramsStr = paramsStr.slice(1);
+  }
+
+  const components = Array.from(componentsStr.matchAll(/"([^"]+)"/g)).map((m) => m[1]);
+  if (components.length === 0) {
+    throw new SignatureError('Signature-Input missing components');
+  }
+
+  const params = paramsStr
+    ? paramsStr.split(';').map((param) => param.trim()).filter(Boolean)
+    : [];
+  const paramsMap: Record<string, string> = {};
+  for (const param of params) {
+    const [key, valuePart] = param.split('=', 2);
+    paramsMap[key] = valuePart ?? '';
+  }
+
+  if (!paramsMap.created) {
+    throw new SignatureError('Missing created timestamp');
+  }
+  const created = Number.parseInt(paramsMap.created, 10);
+  if (!Number.isFinite(created)) {
+    throw new SignatureError('Invalid created timestamp');
+  }
+
+  const alg = paramsMap.alg ? paramsMap.alg.replace(/"/g, '') : undefined;
+  return { components, params, created, alg };
+}
+
 /**
  * Generate a new Ed25519 keypair.
  *
@@ -79,64 +223,40 @@ function createSignatureBase(
   method: string,
   url: string,
   headers: Record<string, string>,
-  body?: Buffer
+  body?: Buffer,
+  created?: number,
+  date?: string
 ): SignatureComponents {
   const parsedUrl = new URL(url);
   const now = new Date();
 
   // Ensure required headers exist
   headers = { ...headers };
+  const headerLookup = normalizeHeaders(headers);
 
-  if (!Object.keys(headers).find((k) => k.toLowerCase() === 'host')) {
+  if (!headerLookup.host) {
     headers['Host'] = parsedUrl.host;
+    headerLookup.host = parsedUrl.host;
   }
 
-  if (!Object.keys(headers).find((k) => k.toLowerCase() === 'date')) {
-    headers['Date'] = now.toUTCString();
+  if (!headerLookup.date) {
+    headers['Date'] = date ?? now.toUTCString();
+    headerLookup.date = headers['Date'];
   }
 
-  const created = Math.floor(now.getTime() / 1000);
+  const createdTimestamp = created ?? Math.floor(now.getTime() / 1000);
 
-  // Add content-digest for requests with body
-  if (body && body.length > 0) {
-    const digest = createHash('sha256').update(body).digest('base64');
-    headers['Content-Digest'] = `sha-256=:${digest}:`;
-  }
-
-  // Components to sign
   const components = ['@method', '@target-uri', '@authority', 'date'];
   if (body && body.length > 0) {
+    headers['Content-Digest'] = contentDigest(body);
     components.push('content-digest');
   }
 
-  // Normalize header keys for lookup
-  const headerLookup: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    headerLookup[key.toLowerCase()] = value;
-  }
-
-  // Build signature base
-  const lines: string[] = [];
-  for (const component of components) {
-    if (component === '@method') {
-      lines.push(`"@method": ${method.toUpperCase()}`);
-    } else if (component === '@target-uri') {
-      lines.push(`"@target-uri": ${url}`);
-    } else if (component === '@authority') {
-      lines.push(`"@authority": ${parsedUrl.host}`);
-    } else if (component === 'date') {
-      lines.push(`"date": ${headerLookup['date'] || ''}`);
-    } else if (component === 'content-digest') {
-      lines.push(`"content-digest": ${headerLookup['content-digest'] || ''}`);
-    }
-  }
-
-  // Add signature params
-  const componentsStr = components.map((c) => `"${c}"`).join(' ');
-  lines.push(`"@signature-params": (${componentsStr});created=${created};alg="ed25519"`);
-
-  const signatureBase = lines.join('\n');
-  const signatureParams = `(${componentsStr});created=${created};alg="ed25519"`;
+  const signatureParams = formatSignatureParams(components, [
+    `created=${createdTimestamp}`,
+    'alg="ed25519"',
+  ]);
+  const signatureBase = buildSignatureBase(method, url, headers, components, signatureParams);
 
   return { signatureBase, signatureParams, headers };
 }
@@ -150,13 +270,17 @@ export function signRequest(
   headers: Record<string, string>,
   body: Buffer | undefined,
   privateKey: KeyObject,
-  keyId: string
+  keyId: string,
+  created?: number,
+  date?: string
 ): Record<string, string> {
   const { signatureBase, signatureParams, headers: updatedHeaders } = createSignatureBase(
     method,
     url,
     headers,
-    body
+    body,
+    created,
+    date
   );
 
   // Sign the base string
@@ -164,8 +288,8 @@ export function signRequest(
   const signatureBase64 = signature.toString('base64');
 
   // Build signature headers (RFC 9421)
-  updatedHeaders['Signature-Input'] = `sig1=${signatureParams}`;
-  updatedHeaders['Signature'] = `sig1=:${signatureBase64}:`;
+  updatedHeaders['Signature-Input'] = `${SIGNATURE_LABEL}=${signatureParams}`;
+  updatedHeaders['Signature'] = `${SIGNATURE_LABEL}=:${signatureBase64}:`;
   updatedHeaders['X-MoltAuth-Key-Id'] = keyId;
 
   return updatedHeaders;
@@ -180,13 +304,12 @@ export function verifySignature(
   headers: Record<string, string>,
   body: Buffer | undefined,
   publicKey: KeyObject,
-  maxAgeSeconds: number = 300
+  maxAgeSeconds: number | null = 300,
+  maxClockSkewSeconds: number | null = 60,
+  requiredComponents: string[] = Array.from(REQUIRED_COMPONENTS),
+  requireContentDigest: boolean = true
 ): boolean {
-  // Normalize header keys
-  const headerLookup: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    headerLookup[key.toLowerCase()] = value;
-  }
+  const headerLookup = normalizeHeaders(headers);
 
   const sigInput = headerLookup['signature-input'] || '';
   const sigHeader = headerLookup['signature'] || '';
@@ -195,46 +318,59 @@ export function verifySignature(
     throw new SignatureError('Missing Signature or Signature-Input header');
   }
 
-  // Parse signature
-  if (!sigHeader.startsWith('sig1=:') || !sigHeader.endsWith(':')) {
-    throw new SignatureError('Invalid Signature header format');
+  const { label, signature } = parseSignatureHeader(sigHeader);
+  const { components, params, created, alg } = parseSignatureInput(sigInput, label);
+
+  if (alg && alg !== 'ed25519') {
+    throw new SignatureError(`Unsupported signature algorithm: ${alg}`);
   }
 
-  const signatureBase64 = sigHeader.slice(6, -1); // Remove "sig1=:" and ":"
-  let signatureBytes: Buffer;
-
-  try {
-    signatureBytes = Buffer.from(signatureBase64, 'base64');
-  } catch {
-    throw new SignatureError('Invalid signature encoding');
-  }
-
-  // Parse created time
-  const createdMatch = sigInput.match(/created=(\d+)/);
-  if (!createdMatch) {
-    throw new SignatureError('Missing created timestamp');
-  }
-
-  const created = parseInt(createdMatch[1], 10);
   const now = Math.floor(Date.now() / 1000);
 
   // Check signature age
-  if (now - created > maxAgeSeconds) {
+  if (maxAgeSeconds !== null && maxAgeSeconds !== undefined && now - created > maxAgeSeconds) {
     throw new SignatureError(
       `Signature expired (age: ${now - created}s, max: ${maxAgeSeconds}s)`
     );
   }
 
-  if (created > now + 60) {
+  if (
+    maxClockSkewSeconds !== null &&
+    maxClockSkewSeconds !== undefined &&
+    created > now + maxClockSkewSeconds
+  ) {
     throw new SignatureError('Signature created in the future');
   }
 
-  // Reconstruct signature base
-  const { signatureBase } = createSignatureBase(method, url, headers, body);
+  if (requiredComponents && requiredComponents.length > 0) {
+    const missing = requiredComponents.filter((c) => !components.includes(c));
+    if (missing.length > 0) {
+      throw new SignatureError(`Signature missing required components: ${missing.join(', ')}`);
+    }
+  }
+
+  if (requireContentDigest && body && body.length > 0 && !components.includes('content-digest')) {
+    throw new SignatureError('Missing content-digest signature component for request body');
+  }
+
+  if (components.includes('content-digest')) {
+    const digestHeader = headerLookup['content-digest'];
+    if (!digestHeader) {
+      throw new SignatureError('Missing Content-Digest header');
+    }
+    const bodyBytes = body ?? Buffer.alloc(0);
+    const expectedDigest = contentDigest(bodyBytes);
+    if (digestHeader !== expectedDigest) {
+      throw new SignatureError('Content-Digest mismatch');
+    }
+  }
+
+  const signatureParams = formatSignatureParams(components, params);
+  const signatureBase = buildSignatureBase(method, url, headers, components, signatureParams);
 
   // Verify
   try {
-    const isValid = verify(null, Buffer.from(signatureBase), publicKey, signatureBytes);
+    const isValid = verify(null, Buffer.from(signatureBase), publicKey, signature);
     if (!isValid) {
       throw new SignatureError('Signature verification failed');
     }

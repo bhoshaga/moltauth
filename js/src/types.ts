@@ -50,6 +50,15 @@ export interface RegisterResult {
 }
 
 /**
+ * Result of a key rotation operation.
+ */
+export interface KeyRotationResult {
+  publicKey: string;
+  privateKey?: string;
+  agent?: Agent;
+}
+
+/**
  * Registration options for new agents.
  */
 export interface RegisterOptions {
@@ -70,6 +79,7 @@ export interface MoltAuthConfig {
   username?: string;
   privateKey?: string; // Ed25519 private key (base64)
   baseUrl?: string;
+  publicKeyTtlSeconds?: number;
 }
 
 /**
