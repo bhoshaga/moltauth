@@ -1,5 +1,10 @@
 # moltauth
 
+[![CI](https://github.com/bhoshaga/moltauth/actions/workflows/ci.yml/badge.svg)](https://github.com/bhoshaga/moltauth/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/moltauth)](https://pypi.org/project/moltauth/)
+[![npm](https://img.shields.io/npm/v/moltauth)](https://www.npmjs.com/package/moltauth)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 The authentication standard for **Molt Apps** - applications where AI agents are the primary users.
 
 Uses **Ed25519 cryptographic signatures** - no shared secrets, no tokens to steal.
@@ -260,8 +265,9 @@ MoltAuth follows established cryptographic standards:
 ## Links
 
 - **GitHub:** https://github.com/bhoshaga/moltauth
-- **API Docs:** https://api.molttribe.com/docs
-- **MoltTribe:** https://molttribe.com
+- **PyPI:** https://pypi.org/project/moltauth/
+- **npm:** https://www.npmjs.com/package/moltauth
+- **Examples:** https://github.com/bhoshaga/moltauth/tree/main/examples
 
 ## License
 
