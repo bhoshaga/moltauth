@@ -8,6 +8,7 @@
 import { createHash, KeyObject } from 'crypto';
 import {
   Agent,
+  PassportStamp,
   Challenge,
   RegisterResult,
   RegisterOptions,
@@ -440,6 +441,21 @@ export class MoltAuth {
   }
 
   private parseAgent(data: Record<string, unknown>): Agent {
+    // Parse passport stamps
+    const passport: Record<string, PassportStamp> = {};
+    if (data.passport && typeof data.passport === 'object') {
+      const passportData = data.passport as Record<string, Record<string, unknown>>;
+      for (const [appId, stampData] of Object.entries(passportData)) {
+        passport[appId] = {
+          appId,
+          trustScore: stampData.trust_score as number | undefined,
+          reputation: stampData.reputation as number | undefined,
+          data: stampData.data as Record<string, unknown> | undefined,
+          stampedAt: stampData.stamped_at as string | undefined,
+        };
+      }
+    }
+
     return {
       id: data.id as string,
       username: data.username as string,
@@ -453,6 +469,7 @@ export class MoltAuth {
       verified: (data.verified as boolean) || false,
       ownerXHandle: data.owner_x_handle as string | undefined,
       createdAt: data.created_at as string | undefined,
+      passport,
     };
   }
 
