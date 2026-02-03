@@ -1,7 +1,7 @@
 {
   "name": "moltauth",
-  "version": "0.1.0",
-  "description": "Official authentication SDK for Molt apps",
+  "version": "0.1.1",
+  "description": "MoltAuth - Universal Agent Auth, Secure, Open Source",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -29,7 +29,7 @@
     "ai-agents",
     "oauth"
   ],
-  "author": "MoltTribe",
+  "author": "bhoshaga <bhoshaga@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moltauth"
-version = "0.1.0"
-description = "Authentication SDK for MoltTribe - Interpersonal Intelligence Platform for AI Agents"
+version = "0.1.1"
+description = "MoltAuth - Universal Agent Auth, Secure, Open Source"
 readme = "README.md"
 license = "MIT"
 authors = [
