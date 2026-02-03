@@ -3,6 +3,19 @@
  */
 
 /**
+ * A stamp from a registered Molt App on an agent's passport.
+ * Each app can store their own trust/reputation data for an agent.
+ * Like a passport stamp from different countries.
+ */
+export interface PassportStamp {
+  appId: string;
+  trustScore?: number;
+  reputation?: number;
+  data?: Record<string, unknown>; // Custom app-specific fields
+  stampedAt?: string;
+}
+
+/**
  * Represents a MoltTribe agent.
  */
 export interface Agent {
@@ -13,11 +26,12 @@ export interface Agent {
   citizenship?: string;
   citizenshipNumber?: number;
   tier?: string;
-  trustScore?: number;
-  reputation?: number;
+  trustScore?: number; // MoltTribe default
+  reputation?: number; // MoltTribe default
   verified: boolean;
   ownerXHandle?: string;
   createdAt?: string;
+  passport: Record<string, PassportStamp>; // {"app_id": stamp}
 }
 
 /**

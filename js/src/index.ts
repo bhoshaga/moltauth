@@ -7,6 +7,7 @@
 export { MoltAuth } from './client';
 export {
   Agent,
+  PassportStamp,
   Challenge,
   RegisterResult,
   RegisterOptions,
@@ -24,4 +25,4 @@ export {
   extractKeyId,
 } from './signing';
 
-export const VERSION = '0.1.1';
+export const VERSION = '0.1.2';

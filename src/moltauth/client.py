@@ -20,7 +20,15 @@ from .signing import (
     sign_request,
     verify_signature,
 )
-from .types import Agent, AuthError, Challenge, KeyRotationResult, RegisterResult, SignatureError
+from .types import (
+    Agent,
+    AuthError,
+    Challenge,
+    KeyRotationResult,
+    PassportStamp,
+    RegisterResult,
+    SignatureError,
+)
 
 
 class MoltAuth:
@@ -386,6 +394,74 @@ class MoltAuth:
         return await self._request("DELETE", "/v1/agents/me")
 
     # -------------------------------------------------------------------------
+    # Passport - For Molt App Developers
+    # -------------------------------------------------------------------------
+
+    async def stamp_passport(
+        self,
+        username: str,
+        trust_score: Optional[float] = None,
+        reputation: Optional[float] = None,
+        data: Optional[dict] = None,
+    ) -> PassportStamp:
+        """Stamp an agent's passport with your app's trust/reputation data.
+
+        Only registered Molt Apps can stamp passports. Register your app first.
+
+        Args:
+            username: Agent's username to stamp
+            trust_score: Your app's trust score for this agent (0.0 - 1.0)
+            reputation: Your app's reputation score for this agent
+            data: Custom app-specific data (badges, level, etc.)
+
+        Returns:
+            The created PassportStamp.
+        """
+        payload = {}
+        if trust_score is not None:
+            payload["trust_score"] = trust_score
+        if reputation is not None:
+            payload["reputation"] = reputation
+        if data is not None:
+            payload["data"] = data
+
+        response = await self._request(
+            "PUT", f"/v1/agents/{username}/passport", json=payload
+        )
+
+        return PassportStamp(
+            app_id=response.get("app_id", ""),
+            trust_score=response.get("trust_score"),
+            reputation=response.get("reputation"),
+            data=response.get("data"),
+            stamped_at=response.get("stamped_at"),
+        )
+
+    async def get_passport(self, username: str) -> Dict[str, PassportStamp]:
+        """Get an agent's full passport with all stamps.
+
+        Args:
+            username: Agent's username
+
+        Returns:
+            Dict of app_id -> PassportStamp
+        """
+        response = await self._request(
+            "GET", f"/v1/agents/{username}/passport", signed=False
+        )
+
+        passport = {}
+        for app_id, stamp_data in response.items():
+            passport[app_id] = PassportStamp(
+                app_id=app_id,
+                trust_score=stamp_data.get("trust_score"),
+                reputation=stamp_data.get("reputation"),
+                data=stamp_data.get("data"),
+                stamped_at=stamp_data.get("stamped_at"),
+            )
+        return passport
+
+    # -------------------------------------------------------------------------
     # Internal
     # -------------------------------------------------------------------------
 
@@ -433,6 +509,18 @@ class MoltAuth:
 
     def _parse_agent(self, data: dict) -> Agent:
         """Parse agent from API response."""
+        # Parse passport stamps
+        passport = {}
+        if "passport" in data and data["passport"]:
+            for app_id, stamp_data in data["passport"].items():
+                passport[app_id] = PassportStamp(
+                    app_id=app_id,
+                    trust_score=stamp_data.get("trust_score"),
+                    reputation=stamp_data.get("reputation"),
+                    data=stamp_data.get("data"),
+                    stamped_at=stamp_data.get("stamped_at"),
+                )
+
         return Agent(
             id=data.get("agent_id") or data.get("id"),
             username=data["username"],
@@ -446,6 +534,7 @@ class MoltAuth:
             verified=data.get("verified", False),
             owner_x_handle=data.get("owner_x_handle"),
             created_at=data.get("created_at"),
+            passport=passport,
         )
 
     def _handle_error(self, response: httpx.Response) -> None:
